@@ -8,8 +8,8 @@ from ...builder import BACKBONES
 from mmcv.cnn import (build_conv_layer, build_norm_layer, constant_init,
                       kaiming_init)
 from mmcv.runner import BaseModule
-from .DeformConv import ModulatedDeformableConv2d as DCN
 import torch.nn.functional as F
+
 
 class Lap_Pyramid_Conv(nn.Module):
     def __init__(self, num_high=3, kernel_size=5, channels=3):
@@ -70,19 +70,21 @@ class Lap_Pyramid_Conv(nn.Module):
 class ResidualBlock(nn.Module):
     def __init__(self, in_features, out_features):
         super().__init__()
+        self.conv_x = nn.Conv2d(in_features, out_features, 3, padding=1)
 
         self.block = nn.Sequential(
             nn.Conv2d(in_features, in_features, 3, padding=1),
             nn.LeakyReLU(True),
-            nn.Conv2d(in_features, out_features, 3, padding=1),
+            nn.Conv2d(in_features, in_features, 3, padding=1),
         )
 
     def forward(self, x):
-        return x + self.block(x)
-  
+        return self.conv_x(x + self.block(x))
+
 
 @BACKBONES.register_module()
 class PENet(nn.Module):
+
     def __init__(self,
                  num_high=3,
                  ch_blocks=32,
@@ -95,9 +97,7 @@ class PENet(nn.Module):
         self.num_high = num_high
         self.lap_pyramid = Lap_Pyramid_Conv(num_high, gauss_kernel)
 
-
-        for i in range(0, self.num_high+1):
-        
+        for i in range(0, self.num_high + 1):
             self.__setattr__('AE_{}'.format(i), AE(3))
 
     def forward(self, x):
@@ -105,7 +105,7 @@ class PENet(nn.Module):
 
         trans_pyrs = []
 
-        for i in range(self.num_high+1):
+        for i in range(self.num_high + 1):
             trans_pyr = self.__getattr__('AE_{}'.format(i))(
                 pyrs[-1 - i])
             trans_pyrs.append(trans_pyr)
@@ -114,10 +114,8 @@ class PENet(nn.Module):
         return out
 
 
-
-
 class DPM(nn.Module):
-    def __init__(self, inplanes, planes, act=nn.LeakyReLU(negative_slope=0.2,inplace=True), bias=False):
+    def __init__(self, inplanes, planes, act=nn.LeakyReLU(negative_slope=0.2, inplace=True), bias=False):
         super(DPM, self).__init__()
 
         self.conv_mask = nn.Conv2d(inplanes, 1, kernel_size=1, bias=bias)
@@ -164,36 +162,43 @@ class DPM(nn.Module):
 
 import cv2
 from torchvision import transforms
-def sobel(img):
 
-    x = img.squeeze(0).cpu().numpy().transpose(1,2,0)
-    x = x*255
-    x_x = cv2.Sobel(x, cv2.CV_64F, 1, 0)
-    x_y = cv2.Sobel(x, cv2.CV_64F, 0, 1)
-    add_x = cv2.addWeighted(x_x,0.5,x_y,0.5,0)
-    add_x = transforms.ToTensor()(add_x).unsqueeze(0)
-    return add_x
+
+def sobel(img):
+    add_x_total = torch.zeros(img.shape)
+
+    for i in range(img.shape[0]):
+        x = img[i, :, :, :].squeeze(0).cpu().numpy().transpose(1, 2, 0)
+
+        x = x * 255
+        x_x = cv2.Sobel(x, cv2.CV_64F, 1, 0)
+        x_y = cv2.Sobel(x, cv2.CV_64F, 0, 1)
+        add_x = cv2.addWeighted(x_x, 0.5, x_y, 0.5, 0)
+        add_x = transforms.ToTensor()(add_x).unsqueeze(0)
+        add_x_total[i, :, :, :] = add_x
+
+    return add_x_total
+
 
 class AE(nn.Module):
-    def __init__(self, n_feat, reduction=8, bias=False, act=nn.LeakyReLU(negative_slope=0.2,inplace=True), groups =1):
-
+    def __init__(self, n_feat, reduction=8, bias=False, act=nn.LeakyReLU(negative_slope=0.2, inplace=True), groups=1):
         super(AE, self).__init__()
 
         self.n_feat = n_feat
         self.groups = groups
         self.reduction = reduction
         self.agg = nn.Conv2d(6,
-                      3,
-                      1,
-                      stride=1,
-                      padding=0,
-                      bias=False)
+                             3,
+                             1,
+                             stride=1,
+                             padding=0,
+                             bias=False)
         self.conv_edge = nn.Conv2d(3, 3, kernel_size=1, bias=bias)
-        
+
         self.res1 = ResidualBlock(3, 32)
         self.res2 = ResidualBlock(32, 3)
         self.dpm = nn.Sequential(DPM(32, 32))
-        
+
         self.conv1 = nn.Conv2d(3, 32, kernel_size=1)
         self.conv2 = nn.Conv2d(32, 3, kernel_size=1)
         self.lpm = LowPassModule(32)
@@ -202,21 +207,22 @@ class AE(nn.Module):
     def forward(self, x):
         s_x = sobel(x)
         s_x = self.conv_edge(x)
-        
+
         res = self.res1(x)
         res = self.dpm(res)
         res = self.res2(res)
-        out = torch.cat([res, s_x+x],dim=1)
+        out = torch.cat([res, s_x + x], dim=1)
         out = self.agg(out)
-        
+
         low_fea = self.conv1(x)
         low_fea = self.lpm(low_fea)
         low_fea = self.conv2(low_fea)
-        
+
         out = torch.cat([out, low_fea], dim=1)
         out = self.fusion(out)
-        
+
         return out
+
 
 class LowPassModule(nn.Module):
     def __init__(self, in_channel, sizes=(1, 2, 3, 6)):
@@ -224,7 +230,7 @@ class LowPassModule(nn.Module):
         self.stages = []
         self.stages = nn.ModuleList([self._make_stage(size) for size in sizes])
         self.relu = nn.ReLU()
-        ch =  in_channel // 4
+        ch = in_channel // 4
         self.channel_splits = [ch, ch, ch, ch]
 
     def _make_stage(self, size):
